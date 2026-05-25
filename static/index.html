@@ -406,15 +406,43 @@ async function saveInstance() {
 }
 
 async function undoLast() {
+  // Stage 1: pop last click point
+  if (points.length > 0) {
+    const wasLabel = labels[labels.length - 1];
+    points.pop();
+    labels.pop();
+    if (points.length > 0 || box) {
+      await runSegment();  // re-run SAM with fewer prompts
+    } else {
+      masks = []; selectedMask = -1;
+      renderMaskOptions();
+      draw();
+    }
+    setStatus(`Undo ${wasLabel ? "+" : "-"} point · 剩 ${points.length} points`);
+    return;
+  }
+  // Stage 2: pop active box
+  if (box) {
+    box = null;
+    masks = []; selectedMask = -1;
+    renderMaskOptions();
+    draw();
+    setStatus("Undo box");
+    return;
+  }
+  // Stage 3: no active prompts — undo last saved instance
   const resp = await fetch("/api/undo/" + encodeURIComponent(currentName), { method: "POST" });
   const d = await resp.json();
   if (d.ok) {
-    setStatus(`Undo OK · ${d.remaining} remaining`);
+    setStatus(`Undo last saved · 剩 ${d.remaining}`);
     const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
     existingInstances = lblResp.instances;
+    editingIdx = -1;  // any pending edit context is no longer valid
     draw();
     await loadFileList();
-  } else setStatus("Undo: " + d.error);
+  } else {
+    setStatus("Undo: " + (d.error || "nothing to undo"));
+  }
 }
 
 function prevImage() { if (currentIdx > 0) loadImage(currentIdx - 1); }
