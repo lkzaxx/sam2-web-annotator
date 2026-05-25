@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Checkpoints (large binary, download separately)
+checkpoints/
+*.pt
+*.pth
+
+# Local data (per-user; should not be in repo)
+images/
+labels/
+sam2_annotator/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Misc
+*.log
