@@ -30,7 +30,8 @@ canvas { position:absolute; top:0; left:0; touch-action:none; }
 #mask-options { display:flex; gap:8px; }
 .mask-option { cursor:pointer; position:relative; display:inline-block; }
 .mask-option img { height:120px; border:3px solid #333; border-radius:4px; display:block; }
-.mask-option.selected img { border-color:#0f0; }
+.mask-option.selected img { border-color:#0f0; box-shadow:0 0 12px #0f0; }
+.mask-option.selected::after { content:"● ON"; position:absolute; top:4px; right:4px; font-size:10px; background:#0a7; color:#fff; padding:2px 6px; border-radius:3px; font-weight:bold; }
 .mask-label { position:absolute; bottom:2px; left:2px; font-size:10px; background:rgba(0,0,0,0.7); padding:1px 4px; border-radius:2px; }
 #hint { font-size:11px; color:#aaa; padding:0 8px; }
 </style>
@@ -292,13 +293,13 @@ async function runSegment() {
   const data = await resp.json();
   masks = data.masks; selectedMask = -1;
   renderMaskOptions();
-  // auto-select highest score
+  // auto-select smallest area (most local mask) — usually what you want for thin objects
   if (masks.length) {
     let best = 0;
-    masks.forEach((m, i) => { if (m.score > masks[best].score) best = i; });
+    masks.forEach((m, i) => { if (m.area < masks[best].area) best = i; });
     selectMask(best);
   }
-  setStatus(`SAM2 ${(performance.now()-t0).toFixed(0)}ms · ${masks.length} candidates`);
+  setStatus(`SAM2 ${(performance.now()-t0).toFixed(0)}ms · ${masks.length} candidates · auto-picked smallest`);
 }
 
 function renderMaskOptions() {
