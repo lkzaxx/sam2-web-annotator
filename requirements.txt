@@ -1,0 +1,8 @@
+flask>=3.0
+opencv-python>=4.8
+numpy>=1.24
+# SAM 2.1 (install via git, not on PyPI as official package):
+#   pip install git+https://github.com/facebookresearch/sam2.git
+# torch + torchvision must be installed separately to match your CUDA / driver,
+# e.g.:
+#   pip install torch==2.10.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128
