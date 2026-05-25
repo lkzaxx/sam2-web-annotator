@@ -178,15 +178,54 @@ def api_save():
         return jsonify({"ok": False, "error": "polygon empty (mask too small or fragmented)"})
     base = os.path.splitext(name)[0]
     label_path = os.path.join(LABEL_DIR, base + ".txt")
-    with open(label_path, "a") as f:
-        for poly in polys:
-            coords = []
-            for x, y in poly:
-                coords.append(f"{x/w:.6f}")
-                coords.append(f"{y/h:.6f}")
-            f.write(f"{cid} " + " ".join(coords) + "\n")
-    return jsonify({"ok": True, "polygons_added": len(polys),
-                    "instance_count": count_instances(label_path)})
+    # read existing lines
+    old_lines = []
+    if os.path.exists(label_path):
+        with open(label_path) as f:
+            old_lines = [l.rstrip("\n") for l in f if l.strip()]
+    # build new lines
+    new_lines = []
+    for poly in polys:
+        coords = []
+        for x, y in poly:
+            coords.append(f"{x/w:.6f}")
+            coords.append(f"{y/h:.6f}")
+        new_lines.append(f"{cid} " + " ".join(coords))
+    # replace at index, or append
+    replace_idx = int(data.get("replace_idx", -1))
+    if 0 <= replace_idx < len(old_lines):
+        merged = old_lines[:replace_idx] + new_lines + old_lines[replace_idx + 1:]
+        new_idx = replace_idx
+    else:
+        new_idx = len(old_lines)
+        merged = old_lines + new_lines
+    with open(label_path, "w") as f:
+        f.write("\n".join(merged) + "\n")
+    return jsonify({"ok": True, "polygons_added": len(new_lines),
+                    "instance_count": len(merged),
+                    "instance_idx": new_idx})
+
+
+@app.route("/api/delete_instance", methods=["POST"])
+def api_delete_instance():
+    data = request.json
+    name = data["image"]
+    idx = int(data["idx"])
+    base = os.path.splitext(name)[0]
+    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    if not os.path.exists(label_path):
+        return jsonify({"ok": False, "error": "no label file"})
+    with open(label_path) as f:
+        lines = [l.rstrip("\n") for l in f if l.strip()]
+    if not (0 <= idx < len(lines)):
+        return jsonify({"ok": False, "error": "idx out of range"})
+    del lines[idx]
+    if lines:
+        with open(label_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    else:
+        os.remove(label_path)
+    return jsonify({"ok": True, "remaining": len(lines)})
 
 @app.route("/api/clear/<path:name>", methods=["DELETE"])
 def api_clear(name):
