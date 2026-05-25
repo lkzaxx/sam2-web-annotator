@@ -132,14 +132,25 @@ def api_segment():
         kwargs["box"] = np.array(data["box"], dtype=np.float32)
     masks, scores, _ = predictor.predict(**kwargs)
     out = []
+    # apply the same post-processing as /api/save so preview polygon == saved polygon
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     for mask, score in zip(masks, scores):
         m_bool = mask > 0.5
-        m_u8 = (m_bool.astype(np.uint8)) * 255
+        # largest connected component
+        n, lbls, stats, _ = cv2.connectedComponentsWithStats(m_bool.astype(np.uint8), 8)
+        if n > 1:
+            largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+            m_bool = (lbls == largest)
+        # morph close
+        m_u8 = cv2.morphologyEx((m_bool * 255).astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=1)
+        m_bool = m_u8 > 127
+        polys = mask_to_polygons(m_bool, simplify_eps=2.0)
         _, buf = cv2.imencode(".png", m_u8)
         out.append({
-            "mask":  base64.b64encode(buf).decode("utf-8"),
-            "score": float(score),
-            "area":  float(m_bool.sum() / (h * w)),
+            "mask":     base64.b64encode(buf).decode("utf-8"),
+            "score":    float(score),
+            "area":     float(m_bool.sum() / (h * w)),
+            "polygons": polys,
         })
     return jsonify({"masks": out, "width": w, "height": h})
 
