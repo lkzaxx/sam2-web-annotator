@@ -53,6 +53,7 @@ canvas { position:absolute; top:0; left:0; touch-action:none; }
     <button class="btn-clear" onclick="clearPrompts()">Reset (R)</button>
     <button class="btn-undo" onclick="undoLast()">Undo (Z)</button>
     <button class="btn-save" onclick="saveInstance()">Save (Enter)</button>
+    <button class="btn-nav" onclick="commitCurrent()">New Instance (N)</button>
     <span id="hint">滑鼠左鍵下點；滾輪縮放；中鍵拖曳平移</span>
     <span id="status">Ready</span>
   </div>
@@ -76,6 +77,7 @@ let existingInstances = [];
 let classes = [];
 let currentClass = 0;
 let imgW = 0, imgH = 0;
+let editingIdx = -1;  // -1: not editing any saved instance; >=0: index in existingInstances being refined
 
 async function init() {
   canvas = document.getElementById("canvas");
@@ -89,7 +91,12 @@ async function init() {
     opt.style.color = c.color;
     sel.appendChild(opt);
   });
-  sel.addEventListener("change", e => { currentClass = parseInt(e.target.value); draw(); });
+  sel.addEventListener("change", e => {
+    // Changing class implies "this is a different object" — commit current edit and start fresh.
+    if (editingIdx >= 0) commitCurrent();
+    currentClass = parseInt(e.target.value);
+    draw();
+  });
 
   await loadFileList();
   if (images.length > 0) await loadImage(0);
@@ -134,6 +141,10 @@ async function loadImage(idx) {
   currentName = images[idx].name;
   document.querySelectorAll("#file-list li").forEach((li, i) => li.classList.toggle("active", i === idx));
   setStatus("Loading " + currentName);
+  // commit any in-progress edit before switching image (don't try to delete on a different image's label)
+  editingIdx = -1;
+  points = []; labels = []; box = null; masks = []; selectedMask = -1;
+  renderMaskOptions();
   // load label
   const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
   imgW = lblResp.width; imgH = lblResp.height;
@@ -142,7 +153,6 @@ async function loadImage(idx) {
   img = new Image();
   img.onload = () => {
     fitCanvas();
-    clearPrompts();
     setStatus(`${currentName} ${img.naturalWidth}x${img.naturalHeight} · 已有 ${existingInstances.length} 個 instance`);
   };
   img.src = "/api/image/" + encodeURIComponent(currentName) + "?t=" + Date.now();
@@ -188,8 +198,10 @@ function draw() {
   if (!img.naturalWidth) return;
   ctx.drawImage(img, offsetX, offsetY, img.naturalWidth * scale, img.naturalHeight * scale);
 
-  // existing saved instance polygons (solid line)
-  for (const inst of existingInstances) {
+  // existing saved instance polygons (solid line) — skip the one being edited
+  for (let i = 0; i < existingInstances.length; i++) {
+    if (i === editingIdx) continue;
+    const inst = existingInstances[i];
     const color = classColor(inst.class_id);
     drawPolygon(inst.points, color, color + "44", false);
   }
@@ -273,6 +285,7 @@ function onKey(e) {
   else if (e.key === "e" || e.key === "E") setMode("neg");
   else if (e.key === "b" || e.key === "B") setMode("box");
   else if (e.key === "r" || e.key === "R") clearPrompts();
+  else if (e.key === "n" || e.key === "N") commitCurrent();
   else if (e.key === "z" || e.key === "Z") undoLast();
   else if (e.key === "Enter")                saveInstance();
   else if (e.key >= "1" && e.key <= "9") {
@@ -289,12 +302,41 @@ function setMode(m) {
   if (m === "box")   document.getElementById("btn-box").classList.add("active");
 }
 
-function clearPrompts() {
+async function clearPrompts() {
+  // If we're refining an already-saved instance, deleting prompts also deletes that instance.
+  if (editingIdx >= 0) {
+    const targetIdx = editingIdx;
+    const resp = await fetch("/api/delete_instance", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: currentName, idx: targetIdx }),
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      const lbl = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+      existingInstances = lbl.instances;
+      setStatus(`Reset · 已存的 instance ${targetIdx} 一併刪除 · 剩 ${d.remaining}`);
+      await loadFileList();
+    } else {
+      setStatus("Reset · delete failed: " + d.error);
+    }
+  } else {
+    setStatus("Prompts cleared");
+  }
   points = []; labels = []; box = null;
   masks = []; selectedMask = -1;
+  editingIdx = -1;
   renderMaskOptions();
   draw();
-  setStatus("Prompts cleared");
+}
+
+function commitCurrent() {
+  // Finish editing the current instance (it stays saved); ready for a fresh new instance.
+  points = []; labels = []; box = null;
+  masks = []; selectedMask = -1;
+  editingIdx = -1;
+  renderMaskOptions();
+  draw();
+  setStatus("Committed · 可開始下一個 instance");
 }
 
 async function runSegment() {
@@ -348,15 +390,18 @@ async function saveInstance() {
       image: currentName,
       class_id: currentClass,
       mask: masks[selectedMask].mask,
+      replace_idx: editingIdx,  // <0: append; >=0: replace this line
     }),
   });
   const d = await resp.json();
   if (!d.ok) { setStatus("Save failed: " + d.error); return; }
-  setStatus(`Saved class=${currentClass} (+${d.polygons_added} poly) · total=${d.instance_count}`);
-  // refresh existing instances overlay
+  // Track which instance we just wrote so further clicks refine it (re-save = update, not append)
+  editingIdx = d.instance_idx;
+  setStatus(`Saved class=${currentClass} idx=${editingIdx} · total=${d.instance_count} · 繼續點精修 / N 鍵開新 instance`);
   const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
   existingInstances = lblResp.instances;
-  clearPrompts();
+  // DON'T clear prompts — keep points alive so user can continue refining the same instance.
+  draw();
   await loadFileList();
 }
 
