@@ -89,7 +89,7 @@ async function init() {
     opt.style.color = c.color;
     sel.appendChild(opt);
   });
-  sel.addEventListener("change", e => { currentClass = parseInt(e.target.value); });
+  sel.addEventListener("change", e => { currentClass = parseInt(e.target.value); draw(); });
 
   await loadFileList();
   if (images.length > 0) await loadImage(0);
@@ -165,26 +165,41 @@ function classColor(cid) {
   return c ? c.color : "#fff";
 }
 
+function drawPolygon(points, strokeColor, fillColor, dashed) {
+  if (!points.length) return;
+  ctx.strokeStyle = strokeColor;
+  ctx.fillStyle = fillColor;
+  ctx.lineWidth = 2;
+  ctx.setLineDash(dashed ? [6, 4] : []);
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 function draw() {
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (!img.naturalWidth) return;
   ctx.drawImage(img, offsetX, offsetY, img.naturalWidth * scale, img.naturalHeight * scale);
 
-  // existing instance polygons
+  // existing saved instance polygons (solid line)
   for (const inst of existingInstances) {
     const color = classColor(inst.class_id);
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color + "44";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    inst.points.forEach((p, i) => {
-      const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
+    drawPolygon(inst.points, color, color + "44", false);
+  }
+
+  // preview polygon from currently selected mask (dashed line, current class color)
+  if (selectedMask >= 0 && masks[selectedMask] && masks[selectedMask].polygons) {
+    const color = classColor(currentClass);
+    for (const poly of masks[selectedMask].polygons) {
+      drawPolygon(poly, color, color + "55", true);
+    }
   }
 
   // pending box
@@ -322,23 +337,7 @@ function renderMaskOptions() {
 function selectMask(i) {
   selectedMask = i;
   renderMaskOptions();
-  // overlay selected mask on canvas
-  draw();
-  if (i < 0 || i >= masks.length) return;
-  const im = new Image();
-  im.onload = () => {
-    ctx.globalAlpha = 0.45;
-    ctx.drawImage(im, offsetX, offsetY, img.naturalWidth * scale, img.naturalHeight * scale);
-    ctx.globalAlpha = 1.0;
-    // redraw prompts on top
-    points.forEach((p, k) => {
-      const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
-      ctx.fillStyle = labels[k] ? "#0f0" : "#f33";
-      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
-      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
-    });
-  };
-  im.src = "data:image/png;base64," + masks[i].mask;
+  draw();  // preview polygon is drawn inside draw() based on selectedMask
 }
 
 async function saveInstance() {
