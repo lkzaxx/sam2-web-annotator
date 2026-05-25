@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>SAM2 Web Annotator</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,sans-serif; background:#1a1a2e; color:#eee; display:flex; height:100vh; overflow:hidden; }
+#sidebar { width:260px; background:#16213e; padding:10px; overflow-y:auto; flex-shrink:0; }
+#sidebar h2 { color:#0ff; margin-bottom:8px; font-size:16px; }
+#sidebar .stat { font-size:11px; color:#7af; margin-bottom:10px; }
+#file-list { list-style:none; }
+#file-list li { padding:5px 8px; cursor:pointer; border-radius:4px; font-size:11px; margin-bottom:2px; word-break:break-all; display:flex; justify-content:space-between; align-items:center; gap:4px; }
+#file-list li:hover { background:#1a3a5c; }
+#file-list li.active { background:#0a7; color:#fff; }
+#file-list li .badge { font-size:9px; background:#0a7; padding:1px 4px; border-radius:3px; flex-shrink:0; }
+#file-list li.active .badge { background:#fff; color:#0a7; }
+#main { flex:1; display:flex; flex-direction:column; min-width:0; }
+#toolbar { display:flex; gap:6px; padding:8px; background:#16213e; align-items:center; flex-wrap:wrap; }
+#toolbar button, #toolbar select { padding:6px 12px; border:none; border-radius:4px; cursor:pointer; font-size:13px; color:#fff; }
+#toolbar select { background:#333; border:1px solid #555; padding:6px 8px; }
+.btn-point { background:#07a; } .btn-neg { background:#a07; } .btn-box { background:#a70; }
+.btn-clear { background:#c33; } .btn-undo { background:#666; } .btn-nav { background:#555; }
+.btn-save { background:#0a7; font-weight:bold; }
+#toolbar .active { outline:2px solid #fff; }
+#status { font-size:12px; color:#aaa; margin-left:auto; white-space:nowrap; }
+#canvas-wrap { flex:1; position:relative; overflow:hidden; background:#111; }
+canvas { position:absolute; top:0; left:0; touch-action:none; }
+#preview-panel { height:140px; background:#16213e; padding:8px; display:flex; gap:10px; align-items:center; overflow-x:auto; }
+#mask-options { display:flex; gap:8px; }
+.mask-option { cursor:pointer; position:relative; display:inline-block; }
+.mask-option img { height:120px; border:3px solid #333; border-radius:4px; display:block; }
+.mask-option.selected img { border-color:#0f0; }
+.mask-label { position:absolute; bottom:2px; left:2px; font-size:10px; background:rgba(0,0,0,0.7); padding:1px 4px; border-radius:2px; }
+#hint { font-size:11px; color:#aaa; padding:0 8px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>SAM2 Annotator</h2>
+  <div class="stat" id="overall-stat">loading...</div>
+  <ul id="file-list"></ul>
+</div>
+<div id="main">
+  <div id="toolbar">
+    <button class="btn-nav" onclick="prevImage()">◀ Prev (A)</button>
+    <button class="btn-nav" onclick="nextImage()">Next (D) ▶</button>
+    <select id="class-select" title="當前要標的類別"></select>
+    <button class="btn-point active" id="btn-point" onclick="setMode('point')">+ Pt (W)</button>
+    <button class="btn-neg" id="btn-neg" onclick="setMode('neg')">- Pt (E)</button>
+    <button class="btn-box" id="btn-box" onclick="setMode('box')">Box (B)</button>
+    <button class="btn-clear" onclick="clearPrompts()">Reset (R)</button>
+    <button class="btn-undo" onclick="undoLast()">Undo (Z)</button>
+    <button class="btn-save" onclick="saveInstance()">Save (Enter)</button>
+    <span id="hint">滑鼠左鍵下點；滾輪縮放；中鍵拖曳平移</span>
+    <span id="status">Ready</span>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </div>
+  <div id="preview-panel">
+    <div id="mask-options"></div>
+    <div id="hint-bottom" style="font-size:11px;color:#aaa;margin-left:auto;">點 1-N 個正點 → 點 mask 候選 → Save</div>
+  </div>
+</div>
+<script>
+let canvas, ctx, img = new Image();
+let images = [], currentIdx = 0, currentName = null;
+let scale = 1, offsetX = 0, offsetY = 0;
+let mode = "point";
+let points = [], labels = [], box = null;
+let boxStart = null, boxDrag = false, panStart = null;
+let masks = [], selectedMask = -1;
+let existingInstances = [];
+let classes = [];
+let currentClass = 0;
+let imgW = 0, imgH = 0;
+
+async function init() {
+  canvas = document.getElementById("canvas");
+  ctx = canvas.getContext("2d");
+
+  classes = await (await fetch("/api/classes")).json();
+  const sel = document.getElementById("class-select");
+  classes.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.id; opt.textContent = `[${c.id}] ${c.name}`;
+    opt.style.color = c.color;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener("change", e => { currentClass = parseInt(e.target.value); });
+
+  await loadFileList();
+  if (images.length > 0) await loadImage(0);
+
+  canvas.addEventListener("mousedown", onDown);
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseup", onUp);
+  canvas.addEventListener("wheel", onWheel, { passive:false });
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("auxclick", e => { if (e.button === 1) e.preventDefault(); });
+  window.addEventListener("resize", fitCanvas);
+  window.addEventListener("keydown", onKey);
+}
+
+async function loadFileList() {
+  images = await (await fetch("/api/images")).json();
+  const ul = document.getElementById("file-list");
+  ul.innerHTML = "";
+  let total = 0, done = 0, instTotal = 0;
+  images.forEach((f, i) => {
+    total++; if (f.labeled) done++;
+    instTotal += f.instances;
+    const li = document.createElement("li");
+    if (i === currentIdx) li.classList.add("active");
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = f.name;
+    nameSpan.style.overflow = "hidden"; nameSpan.style.textOverflow = "ellipsis";
+    li.appendChild(nameSpan);
+    if (f.instances > 0) {
+      const b = document.createElement("span"); b.className = "badge"; b.textContent = f.instances;
+      li.appendChild(b);
+    }
+    li.onclick = () => loadImage(i);
+    ul.appendChild(li);
+  });
+  document.getElementById("overall-stat").textContent =
+    `共 ${total} 張 · 已標 ${done} 張 · 累計 ${instTotal} 個 instance`;
+}
+
+async function loadImage(idx) {
+  currentIdx = idx;
+  currentName = images[idx].name;
+  document.querySelectorAll("#file-list li").forEach((li, i) => li.classList.toggle("active", i === idx));
+  setStatus("Loading " + currentName);
+  // load label
+  const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+  imgW = lblResp.width; imgH = lblResp.height;
+  existingInstances = lblResp.instances;
+  // load image
+  img = new Image();
+  img.onload = () => {
+    fitCanvas();
+    clearPrompts();
+    setStatus(`${currentName} ${img.naturalWidth}x${img.naturalHeight} · 已有 ${existingInstances.length} 個 instance`);
+  };
+  img.src = "/api/image/" + encodeURIComponent(currentName) + "?t=" + Date.now();
+}
+
+function fitCanvas() {
+  const wrap = document.getElementById("canvas-wrap");
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  if (img.naturalWidth) {
+    scale = Math.min(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+    offsetX = (canvas.width - img.naturalWidth * scale) / 2;
+    offsetY = (canvas.height - img.naturalHeight * scale) / 2;
+  }
+  draw();
+}
+
+function classColor(cid) {
+  const c = classes.find(c => c.id === cid);
+  return c ? c.color : "#fff";
+}
+
+function draw() {
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!img.naturalWidth) return;
+  ctx.drawImage(img, offsetX, offsetY, img.naturalWidth * scale, img.naturalHeight * scale);
+
+  // existing instance polygons
+  for (const inst of existingInstances) {
+    const color = classColor(inst.class_id);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color + "44";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    inst.points.forEach((p, i) => {
+      const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // pending box
+  if (box) {
+    const [x1, y1, x2, y2] = box;
+    ctx.strokeStyle = "#fa0"; ctx.lineWidth = 2;
+    ctx.strokeRect(x1 * scale + offsetX, y1 * scale + offsetY,
+                   (x2 - x1) * scale, (y2 - y1) * scale);
+  }
+
+  // pending points
+  points.forEach((p, i) => {
+    const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
+    ctx.fillStyle = labels[i] ? "#0f0" : "#f33";
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+  });
+}
+
+function imgCoord(ev) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
+  return { x: (cx - offsetX) / scale, y: (cy - offsetY) / scale };
+}
+
+function onDown(e) {
+  if (e.button === 1) { panStart = { x: e.clientX - offsetX, y: e.clientY - offsetY }; return; }
+  const { x, y } = imgCoord(e);
+  if (x < 0 || y < 0 || x > img.naturalWidth || y > img.naturalHeight) return;
+  if (mode === "box") {
+    boxStart = { x, y }; boxDrag = true; box = [x, y, x, y]; draw();
+  } else if (mode === "point") {
+    points.push([x, y]); labels.push(1); runSegment(); draw();
+  } else if (mode === "neg") {
+    points.push([x, y]); labels.push(0); runSegment(); draw();
+  }
+}
+function onMove(e) {
+  if (panStart) {
+    offsetX = e.clientX - panStart.x; offsetY = e.clientY - panStart.y; draw(); return;
+  }
+  if (boxDrag) {
+    const { x, y } = imgCoord(e);
+    box = [Math.min(boxStart.x, x), Math.min(boxStart.y, y),
+           Math.max(boxStart.x, x), Math.max(boxStart.y, y)];
+    draw();
+  }
+}
+function onUp(e) {
+  if (panStart) { panStart = null; return; }
+  if (boxDrag) {
+    boxDrag = false;
+    if (box && (box[2] - box[0]) > 3 && (box[3] - box[1]) > 3) runSegment();
+    draw();
+  }
+}
+function onWheel(e) {
+  e.preventDefault();
+  const { x, y } = imgCoord(e);
+  const factor = e.deltaY < 0 ? 1.2 : 1/1.2;
+  scale *= factor;
+  offsetX = e.clientX - canvas.getBoundingClientRect().left - x * scale;
+  offsetY = e.clientY - canvas.getBoundingClientRect().top  - y * scale;
+  draw();
+}
+function onKey(e) {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft")  prevImage();
+  else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") nextImage();
+  else if (e.key === "w" || e.key === "W") setMode("point");
+  else if (e.key === "e" || e.key === "E") setMode("neg");
+  else if (e.key === "b" || e.key === "B") setMode("box");
+  else if (e.key === "r" || e.key === "R") clearPrompts();
+  else if (e.key === "z" || e.key === "Z") undoLast();
+  else if (e.key === "Enter")                saveInstance();
+  else if (e.key >= "1" && e.key <= "9") {
+    const i = parseInt(e.key) - 1;
+    if (i < masks.length) selectMask(i);
+  }
+}
+
+function setMode(m) {
+  mode = m;
+  ["btn-point", "btn-neg", "btn-box"].forEach(id => document.getElementById(id).classList.remove("active"));
+  if (m === "point") document.getElementById("btn-point").classList.add("active");
+  if (m === "neg")   document.getElementById("btn-neg").classList.add("active");
+  if (m === "box")   document.getElementById("btn-box").classList.add("active");
+}
+
+function clearPrompts() {
+  points = []; labels = []; box = null;
+  masks = []; selectedMask = -1;
+  renderMaskOptions();
+  draw();
+  setStatus("Prompts cleared");
+}
+
+async function runSegment() {
+  if (!points.length && !box) return;
+  setStatus("Running SAM2 ...");
+  const t0 = performance.now();
+  const resp = await fetch("/api/segment", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: currentName, points, labels, box }),
+  });
+  const data = await resp.json();
+  masks = data.masks; selectedMask = -1;
+  renderMaskOptions();
+  // auto-select highest score
+  if (masks.length) {
+    let best = 0;
+    masks.forEach((m, i) => { if (m.score > masks[best].score) best = i; });
+    selectMask(best);
+  }
+  setStatus(`SAM2 ${(performance.now()-t0).toFixed(0)}ms · ${masks.length} candidates`);
+}
+
+function renderMaskOptions() {
+  const wrap = document.getElementById("mask-options");
+  wrap.innerHTML = "";
+  masks.forEach((m, i) => {
+    const div = document.createElement("div");
+    div.className = "mask-option" + (i === selectedMask ? " selected" : "");
+    const im = document.createElement("img");
+    im.src = "data:image/png;base64," + m.mask;
+    const lbl = document.createElement("div");
+    lbl.className = "mask-label";
+    lbl.textContent = `[${i+1}] s=${m.score.toFixed(2)} a=${(m.area*100).toFixed(1)}%`;
+    div.appendChild(im); div.appendChild(lbl);
+    div.onclick = () => selectMask(i);
+    wrap.appendChild(div);
+  });
+}
+
+function selectMask(i) {
+  selectedMask = i;
+  renderMaskOptions();
+  // overlay selected mask on canvas
+  draw();
+  if (i < 0 || i >= masks.length) return;
+  const im = new Image();
+  im.onload = () => {
+    ctx.globalAlpha = 0.45;
+    ctx.drawImage(im, offsetX, offsetY, img.naturalWidth * scale, img.naturalHeight * scale);
+    ctx.globalAlpha = 1.0;
+    // redraw prompts on top
+    points.forEach((p, k) => {
+      const x = p[0] * scale + offsetX, y = p[1] * scale + offsetY;
+      ctx.fillStyle = labels[k] ? "#0f0" : "#f33";
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+    });
+  };
+  im.src = "data:image/png;base64," + masks[i].mask;
+}
+
+async function saveInstance() {
+  if (selectedMask < 0) { setStatus("尚未選 mask"); return; }
+  const resp = await fetch("/api/save", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image: currentName,
+      class_id: currentClass,
+      mask: masks[selectedMask].mask,
+    }),
+  });
+  const d = await resp.json();
+  if (!d.ok) { setStatus("Save failed: " + d.error); return; }
+  setStatus(`Saved class=${currentClass} (+${d.polygons_added} poly) · total=${d.instance_count}`);
+  // refresh existing instances overlay
+  const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+  existingInstances = lblResp.instances;
+  clearPrompts();
+  await loadFileList();
+}
+
+async function undoLast() {
+  const resp = await fetch("/api/undo/" + encodeURIComponent(currentName), { method: "POST" });
+  const d = await resp.json();
+  if (d.ok) {
+    setStatus(`Undo OK · ${d.remaining} remaining`);
+    const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+    existingInstances = lblResp.instances;
+    draw();
+    await loadFileList();
+  } else setStatus("Undo: " + d.error);
+}
+
+function prevImage() { if (currentIdx > 0) loadImage(currentIdx - 1); }
+function nextImage() { if (currentIdx < images.length - 1) loadImage(currentIdx + 1); }
+function setStatus(s) { document.getElementById("status").textContent = s; }
+
+init();
+</script>
+</body>
+</html>
