@@ -82,15 +82,29 @@ def api_classes():
 
 @app.route("/api/images")
 def api_images():
+    """Recursively walk IMG_DIR; return image paths relative to IMG_DIR with forward-slash separators."""
     exts = {".jpg", ".jpeg", ".png", ".webp"}
-    files = sorted(f for f in os.listdir(IMG_DIR) if os.path.splitext(f)[1].lower() in exts)
     result = []
-    for f in files:
-        base = os.path.splitext(f)[0]
-        label = os.path.join(LABEL_DIR, base + ".txt")
-        result.append({"name": f, "labeled": os.path.exists(label),
-                       "instances": count_instances(label)})
+    for root, dirs, files in os.walk(IMG_DIR):
+        dirs.sort()
+        for f in sorted(files):
+            if os.path.splitext(f)[1].lower() not in exts:
+                continue
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, IMG_DIR).replace(os.sep, "/")
+            label = os.path.join(LABEL_DIR, os.path.splitext(rel)[0] + ".txt")
+            result.append({"name": rel,
+                           "labeled": os.path.exists(label),
+                           "instances": count_instances(label)})
     return jsonify(result)
+
+
+def _label_path_for(name):
+    """Get .txt label path mirroring the image's subdir structure; ensures parent dir exists."""
+    rel_no_ext = os.path.splitext(name)[0]
+    p = os.path.join(LABEL_DIR, rel_no_ext + ".txt")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    return p
 
 @app.route("/api/image/<path:name>")
 def api_image(name):
@@ -99,8 +113,7 @@ def api_image(name):
 @app.route("/api/label/<path:name>")
 def api_label(name):
     """Return existing YOLO-seg polygons in pixel coords (de-normalized)."""
-    base = os.path.splitext(name)[0]
-    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    label_path = _label_path_for(name)
     img_path = os.path.join(IMG_DIR, name)
     if not os.path.exists(img_path):
         return jsonify({"width": 0, "height": 0, "instances": []})
@@ -176,8 +189,7 @@ def api_save():
                              min_area=int(data.get("min_area", 50)))
     if not polys:
         return jsonify({"ok": False, "error": "polygon empty (mask too small or fragmented)"})
-    base = os.path.splitext(name)[0]
-    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    label_path = _label_path_for(name)
     # read existing lines
     old_lines = []
     if os.path.exists(label_path):
@@ -211,8 +223,7 @@ def api_delete_instance():
     data = request.json
     name = data["image"]
     idx = int(data["idx"])
-    base = os.path.splitext(name)[0]
-    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    label_path = _label_path_for(name)
     if not os.path.exists(label_path):
         return jsonify({"ok": False, "error": "no label file"})
     with open(label_path) as f:
@@ -229,16 +240,14 @@ def api_delete_instance():
 
 @app.route("/api/clear/<path:name>", methods=["DELETE"])
 def api_clear(name):
-    base = os.path.splitext(name)[0]
-    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    label_path = _label_path_for(name)
     if os.path.exists(label_path):
         os.remove(label_path)
     return jsonify({"ok": True})
 
 @app.route("/api/undo/<path:name>", methods=["POST"])
 def api_undo(name):
-    base = os.path.splitext(name)[0]
-    label_path = os.path.join(LABEL_DIR, base + ".txt")
+    label_path = _label_path_for(name)
     if not os.path.exists(label_path):
         return jsonify({"ok": False, "error": "no label file"})
     with open(label_path) as f:
