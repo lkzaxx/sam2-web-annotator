@@ -9,6 +9,13 @@ body { font-family:-apple-system,sans-serif; background:#1a1a2e; color:#eee; dis
 #sidebar { width:260px; background:#16213e; padding:10px; overflow-y:auto; flex-shrink:0; }
 #sidebar h2 { color:#0ff; margin-bottom:8px; font-size:16px; }
 #sidebar .stat { font-size:11px; color:#7af; margin-bottom:10px; }
+.group-header { font-size:12px; color:#0ff; padding:6px 4px 4px; margin-top:6px; font-weight:bold; border-top:1px solid #233; cursor:pointer; user-select:none; display:flex; justify-content:space-between; align-items:center; gap:6px; }
+.group-header:first-of-type { margin-top:0; border-top:none; }
+.group-header:hover { color:#fff; background:#1a3a5c; border-radius:4px; }
+.group-header .arrow { transition:transform 0.15s ease; display:inline-block; font-size:10px; opacity:0.7; }
+.group-header.collapsed .arrow { transform:rotate(-90deg); }
+.group-header .label { flex:1; }
+.group-body.collapsed { display:none; }
 #file-list { list-style:none; }
 #file-list li { padding:5px 8px; cursor:pointer; border-radius:4px; font-size:11px; margin-bottom:2px; word-break:break-all; display:flex; justify-content:space-between; align-items:center; gap:4px; }
 #file-list li:hover { background:#1a3a5c; }
@@ -111,27 +118,64 @@ async function init() {
   window.addEventListener("keydown", onKey);
 }
 
+function encName(name) {
+  // Preserve forward-slashes in path while encoding each segment for URL safety.
+  return name.split("/").map(encodeURIComponent).join("/");
+}
+
+const collapsedGroups = new Set();  // group names the user has collapsed
+
 async function loadFileList() {
   images = await (await fetch("/api/images")).json();
   const ul = document.getElementById("file-list");
   ul.innerHTML = "";
   let total = 0, done = 0, instTotal = 0;
+  const groups = new Map();
   images.forEach((f, i) => {
-    total++; if (f.labeled) done++;
-    instTotal += f.instances;
-    const li = document.createElement("li");
-    if (i === currentIdx) li.classList.add("active");
-    const nameSpan = document.createElement("span");
-    nameSpan.textContent = f.name;
-    nameSpan.style.overflow = "hidden"; nameSpan.style.textOverflow = "ellipsis";
-    li.appendChild(nameSpan);
-    if (f.instances > 0) {
-      const b = document.createElement("span"); b.className = "badge"; b.textContent = f.instances;
-      li.appendChild(b);
-    }
-    li.onclick = () => loadImage(i);
-    ul.appendChild(li);
+    total++; if (f.labeled) done++; instTotal += f.instances;
+    const seg = f.name.includes("/") ? f.name.split("/")[0] : "(root)";
+    if (!groups.has(seg)) groups.set(seg, []);
+    groups.get(seg).push({ ...f, index: i });
   });
+  for (const [seg, items] of groups) {
+    const labeled = items.filter(x => x.labeled).length;
+    const collapsed = collapsedGroups.has(seg);
+
+    const h = document.createElement("div");
+    h.className = "group-header" + (collapsed ? " collapsed" : "");
+    const arrow = document.createElement("span");
+    arrow.className = "arrow"; arrow.textContent = "▼";
+    const lab = document.createElement("span");
+    lab.className = "label";
+    lab.textContent = `${seg}   ${labeled}/${items.length}`;
+    h.appendChild(arrow); h.appendChild(lab);
+    ul.appendChild(h);
+
+    const body = document.createElement("div");
+    body.className = "group-body" + (collapsed ? " collapsed" : "");
+    h.onclick = () => {
+      const isCollapsed = body.classList.toggle("collapsed");
+      h.classList.toggle("collapsed", isCollapsed);
+      if (isCollapsed) collapsedGroups.add(seg); else collapsedGroups.delete(seg);
+    };
+
+    items.forEach(f => {
+      const li = document.createElement("li");
+      if (f.index === currentIdx) li.classList.add("active");
+      const nameSpan = document.createElement("span");
+      const base = f.name.includes("/") ? f.name.substring(f.name.indexOf("/") + 1) : f.name;
+      nameSpan.textContent = base;
+      nameSpan.style.overflow = "hidden"; nameSpan.style.textOverflow = "ellipsis";
+      li.appendChild(nameSpan);
+      if (f.instances > 0) {
+        const b = document.createElement("span"); b.className = "badge"; b.textContent = f.instances;
+        li.appendChild(b);
+      }
+      li.onclick = () => loadImage(f.index);
+      body.appendChild(li);
+    });
+    ul.appendChild(body);
+  }
   document.getElementById("overall-stat").textContent =
     `共 ${total} 張 · 已標 ${done} 張 · 累計 ${instTotal} 個 instance`;
 }
@@ -146,7 +190,7 @@ async function loadImage(idx) {
   points = []; labels = []; box = null; masks = []; selectedMask = -1;
   renderMaskOptions();
   // load label
-  const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+  const lblResp = await (await fetch("/api/label/" + encName(currentName))).json();
   imgW = lblResp.width; imgH = lblResp.height;
   existingInstances = lblResp.instances;
   // load image
@@ -155,7 +199,7 @@ async function loadImage(idx) {
     fitCanvas();
     setStatus(`${currentName} ${img.naturalWidth}x${img.naturalHeight} · 已有 ${existingInstances.length} 個 instance`);
   };
-  img.src = "/api/image/" + encodeURIComponent(currentName) + "?t=" + Date.now();
+  img.src = "/api/image/" + encName(currentName) + "?t=" + Date.now();
 }
 
 function fitCanvas() {
@@ -312,7 +356,7 @@ async function clearPrompts() {
     });
     const d = await resp.json();
     if (d.ok) {
-      const lbl = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+      const lbl = await (await fetch("/api/label/" + encName(currentName))).json();
       existingInstances = lbl.instances;
       setStatus(`Reset · 已存的 instance ${targetIdx} 一併刪除 · 剩 ${d.remaining}`);
       await loadFileList();
@@ -398,7 +442,7 @@ async function saveInstance() {
   // Track which instance we just wrote so further clicks refine it (re-save = update, not append)
   editingIdx = d.instance_idx;
   setStatus(`Saved class=${currentClass} idx=${editingIdx} · total=${d.instance_count} · 繼續點精修 / N 鍵開新 instance`);
-  const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+  const lblResp = await (await fetch("/api/label/" + encName(currentName))).json();
   existingInstances = lblResp.instances;
   // DON'T clear prompts — keep points alive so user can continue refining the same instance.
   draw();
@@ -431,11 +475,11 @@ async function undoLast() {
     return;
   }
   // Stage 3: no active prompts — undo last saved instance
-  const resp = await fetch("/api/undo/" + encodeURIComponent(currentName), { method: "POST" });
+  const resp = await fetch("/api/undo/" + encName(currentName), { method: "POST" });
   const d = await resp.json();
   if (d.ok) {
     setStatus(`Undo last saved · 剩 ${d.remaining}`);
-    const lblResp = await (await fetch("/api/label/" + encodeURIComponent(currentName))).json();
+    const lblResp = await (await fetch("/api/label/" + encName(currentName))).json();
     existingInstances = lblResp.instances;
     editingIdx = -1;  // any pending edit context is no longer valid
     draw();
